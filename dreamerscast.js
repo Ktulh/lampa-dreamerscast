@@ -140,15 +140,14 @@
 
             this.activity.loader(false);
             var rel = this.release;
-            var multi = playlist.length > 1;
 
             var episodes = playlist.map(function (u, i) {
-                return { title: multi ? 'Серия ' + (i + 1) : (rel.russian || 'Смотреть'), url: u };
+                return { title: 'Серия ' + (i + 1), url: u };
             });
 
             this.reset();
             episodes.forEach(function (ep, i) {
-                self.addItem(ep.title, multi ? rel.russian : '', function () {
+                self.addItem(ep.title, rel.russian, function () {
                     var queue = episodes.map(function (e) {
                         return { title: e.title, url: e.url };
                     });
@@ -234,6 +233,8 @@
     Lampa.Component.add('dreamerscast', Component);
 
     // ---------- кнопка в карточке ----------
+    // Кнопка кладётся в скрытый контейнер .buttons--container: Lampa сама собирает
+    // из него меню кнопки «Смотреть» (рядом с трейлерами и другими плагинами).
     function addButton(e) {
         var root = e.object.activity.render();
         if (root.find('.view--dreamerscast').length) return;
@@ -252,10 +253,14 @@
             });
         });
 
-        var box = root.find('.full-start-new__buttons, .full-start__buttons').eq(0);
-        if (!box.length) box = root.find('.view--torrent').parent();
-        if (box.length) box.append(btn);
+        var box = root.find('.buttons--container').eq(0);
+        if (box.length) box.prepend(btn);
+        else root.find('.full-start-new__buttons, .full-start__buttons').eq(0).prepend(btn);
     }
+
+    // Подсветка выбранной серии
+    $('<style>.dreamerscast__item.focus{background:#fff!important;color:#000}' +
+        '.dreamerscast__item.focus div{opacity:1!important}</style>').appendTo('head');
 
     Lampa.Listener.follow('full', function (e) {
         if (e.type == 'complite') addButton(e);
