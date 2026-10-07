@@ -34,6 +34,34 @@
         return best;
     }
 
+    // Мастер-плейлист содержит и аудио-дорожку без видео, и адаптивное переключение:
+    // плееры (VLC/ExoPlayer) стартуют с самого слабого варианта или застревают на кадре.
+    // Поэтому отдаём плееру прямые ссылки на варианты 1080/720/480 (видео+звук).
+    function qualities(master) {
+        var m = master.match(/^(.*)_,([^/]+),\.mp4\.urlset\/master\.m3u8$/);
+        if (!m) return null;
+
+        var tokens = m[2].split(',');
+        var videos = tokens.slice(0, -1); // последний токен — аудиокодек
+        var map = {};
+
+        videos.forEach(function (t, i) {
+            var label = /^\d+$/.test(t) ? t + 'p' : (i === videos.length - 1 ? '480p' : t);
+            map[label] = m[1] + '_,' + m[2] + ',.mp4.urlset/index-f' + (i + 1) + '-v1-f' + (videos.length + 1) + '-a1.m3u8';
+        });
+        return map;
+    }
+
+    function episode(title, master) {
+        var map = qualities(master);
+        var ep = { title: title, url: master };
+        if (map) {
+            ep.quality = map;
+            ep.url = map[Object.keys(map)[0]]; // первый — максимальный
+        }
+        return ep;
+    }
+
     function Component(object) {
         var network = new Lampa.Reguest();
         var scroll = new Lampa.Scroll({ mask: true, over: true });
@@ -142,16 +170,16 @@
             var rel = this.release;
 
             var episodes = playlist.map(function (u, i) {
-                return { title: 'Серия ' + (i + 1), url: u };
+                return episode('Серия ' + (i + 1), u);
             });
 
             this.reset();
             episodes.forEach(function (ep, i) {
                 self.addItem(ep.title, rel.russian, function () {
                     var queue = episodes.map(function (e) {
-                        return { title: e.title, url: e.url };
+                        return { title: e.title, url: e.url, quality: e.quality };
                     });
-                    var cur = { title: queue[i].title, url: queue[i].url, playlist: queue };
+                    var cur = { title: queue[i].title, url: queue[i].url, quality: queue[i].quality, playlist: queue };
                     Lampa.Player.play(cur);
                     Lampa.Player.playlist(queue);
                 });
