@@ -8,7 +8,7 @@
 
     Lampa.Manifest.plugins = {
         type: 'video',
-        version: '1.0.0',
+        version: '1.0.1',
         name: 'HStream',
         description: 'Каталог hstream.moe отдельным разделом',
         component: 'hstream'
@@ -172,13 +172,16 @@
 
                 // 720p H.264 — самый совместимый вариант, по умолчанию.
                 // Остальное — AV1 DASH: картинка лучше, но не всякий ТВ его тянет.
-                var quality = { '720p H.264': base + '/x264.720p.mp4', '1080p AV1': base + '/1080/manifest.mpd' };
-                if (d.interpolated) quality['1080p 48fps AV1'] = base + '/1080i/manifest.mpd';
-                if (ep.uhd) quality['2160p AV1'] = base + '/2160/manifest.mpd';
+                // Ключи AV1 начинаются не с цифры: Lampa подменяет ссылку на качество, у которого
+                // parseInt(ключ) совпадает с «качеством по умолчанию», и внешний плеер получал бы AV1.
+                var mp4 = base + '/x264.720p.mp4';
+                var quality = { '720p': mp4, 'AV1 1080p': base + '/1080/manifest.mpd' };
+                if (d.interpolated) quality['AV1 1080p 48fps'] = base + '/1080i/manifest.mpd';
+                if (ep.uhd) quality['AV1 2160p'] = base + '/2160/manifest.mpd';
 
                 ok({
                     title: d.title || ep.title,
-                    url: quality['720p H.264'],
+                    url: mp4,
                     quality: quality,
                     subtitles: [{ label: 'English', url: base + '/eng.vtt' }],
                     poster: abs(d.poster)
@@ -365,36 +368,47 @@
         };
 
         this.play = function (item) {
-            Lampa.Loading.start(function () { Lampa.Loading.stop(); });
+            var cancelled = false;
+            Lampa.Loading.start(function () {
+                cancelled = true;
+                Lampa.Loading.stop();
+            });
 
             resolveEpisode(item.url, function (first, ep) {
-                Lampa.Loading.stop();
+                // Ссылки на все серии тайтла получаем заранее и по очереди: внешний плеер
+                // получает плейлист через JSON, функции-«ленивые» ссылки туда не попадают,
+                // а параллельные запросы без cookie создали бы разные сессии с разными CSRF.
+                var others = ep.episodes.filter(function (e) { return e.slug !== item.slug; }).slice(0, 30);
+                var resolved = {};
+                resolved[item.slug] = first;
 
-                first.timeline = Lampa.Timeline.view(timelineHash(item.slug));
+                function next(i) {
+                    if (cancelled) return;
+                    if (i >= others.length) return start();
+                    resolveEpisode(others[i].url, function (res) {
+                        resolved[others[i].slug] = res;
+                        next(i + 1);
+                    }, function () {
+                        next(i + 1);
+                    });
+                }
 
-                // Плейлист из остальных серий тайтла; ссылки получаем по требованию
-                var playlist = ep.episodes.map(function (e) {
-                    if (e.slug === item.slug) return first;
-                    var cell = {
-                        title: ep.title.replace(/\s*Episode\s+\d+$/, '') + ' - ' + e.number,
-                        timeline: Lampa.Timeline.view(timelineHash(e.slug))
-                    };
-                    cell.url = function (call) {
-                        resolveEpisode(e.url, function (res) {
-                            $.extend(cell, res);
-                            call();
-                        }, function () {
-                            cell.url = '';
-                            Lampa.Noty.show('HStream: не удалось получить ссылку');
-                            call();
-                        });
-                    };
-                    return cell;
-                });
+                function start() {
+                    Lampa.Loading.stop();
 
-                if (playlist.length > 1) first.playlist = playlist;
-                Lampa.Player.play(first);
-                Lampa.Player.playlist(playlist.length > 1 ? playlist : [first]);
+                    // Элементы плейлиста — простые объекты без ссылок друг на друга
+                    var playlist = ep.episodes.filter(function (e) { return resolved[e.slug]; }).map(function (e) {
+                        return $.extend({}, resolved[e.slug], { timeline: Lampa.Timeline.view(timelineHash(e.slug)) });
+                    });
+                    var current = playlist.filter(function (p) { return p.url === first.url; })[0] || playlist[0];
+                    var element = $.extend({}, current);
+                    if (playlist.length > 1) element.playlist = playlist;
+
+                    Lampa.Player.play(element);
+                    Lampa.Player.playlist(playlist);
+                }
+
+                next(0);
             }, function () {
                 Lampa.Loading.stop();
                 Lampa.Noty.show('HStream: не удалось получить ссылку на видео');
