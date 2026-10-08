@@ -10,7 +10,7 @@
 
     Lampa.Manifest.plugins = {
         type: 'video',
-        version: '1.3.0',
+        version: '1.3.1',
         name: 'Dreamerscast',
         description: 'Онлайн просмотр релизов команды Dream Cast',
         component: 'dreamerscast'
@@ -362,8 +362,10 @@
             scroll.reset();
         };
 
-        // Плашка «последний просмотр»
+        // Плашка «последний просмотр» — только если уже что-то смотрели
         this.addWatched = function (choice, onEnter) {
+            if (!choice) return;
+
             var el = $('<div class="dcast-watched selector">' +
                 '<div class="dcast-watched__icon"><svg width="21" height="21" viewBox="0 0 21 21" fill="none">' +
                 '<circle cx="10.5" cy="10.5" r="9" stroke="currentColor" stroke-width="3"/>' +
@@ -387,7 +389,7 @@
                 ['Dreamerscast', choice.release_name, choice.title].forEach(function (t) {
                     if (t) body.append('<span>' + esc(t) + '</span>');
                 });
-            } else body.append('<span>Нет истории просмотра</span>');
+            }
         };
 
         this.addCard = function (p) {
