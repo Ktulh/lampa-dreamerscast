@@ -10,7 +10,7 @@
 
     Lampa.Manifest.plugins = {
         type: 'video',
-        version: '1.3.1',
+        version: '1.3.2',
         name: 'Dreamerscast',
         description: 'Онлайн просмотр релизов команды Dream Cast',
         component: 'dreamerscast'
@@ -151,6 +151,8 @@
     function Component(object) {
         var network = new Lampa.Reguest();
         var scroll = new Lampa.Scroll({ mask: true, over: true });
+        // Высота скролла = экран минус шапка; без неё Scroll считает, что всё влезает, и не прокручивает
+        scroll.minus();
         var html = $('<div class="dcast"></div>');
         var last;
         var movie = object.movie || {};
@@ -428,6 +430,7 @@
 
         this.finish = function () {
             scroll.append(html);
+            if (Lampa.Layer) Lampa.Layer.update(scroll.render(true));
             if (last) scroll.update($(last), true);
             this.start();
         };
