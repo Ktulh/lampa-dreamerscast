@@ -8,7 +8,7 @@
 
     Lampa.Manifest.plugins = {
         type: 'video',
-        version: '1.0.1',
+        version: '1.2.0',
         name: 'HStream',
         description: 'Каталог hstream.moe отдельным разделом',
         component: 'hstream'
@@ -19,6 +19,10 @@
         if (u.indexOf('//') === 0) return 'https:' + u;
         if (u.charAt(0) === '/') return BASE + u;
         return u;
+    }
+
+    function text(node) {
+        return node ? node.textContent.replace(/\s+/g, ' ').trim() : '';
     }
 
     // ---------- сеть ----------
@@ -87,6 +91,10 @@
         return new DOMParser().parseFromString(str, 'text/html');
     }
 
+    function seriesSlug(slug) {
+        return slug.replace(/-\d+$/, '');
+    }
+
     // ---------- разбор страниц ----------
     function parseSearch(str) {
         var doc = parseHtml(str);
@@ -96,15 +104,14 @@
             var a = node.querySelector('a[href*="/hentai/"]');
             if (!a) return;
             var img = node.querySelector('img');
-            var title = node.querySelector('h3');
             var badge = node.querySelector('.rounded-full');
-            var href = a.getAttribute('href');
+            var slug = a.getAttribute('href').split('/hentai/').pop();
             items.push({
-                url: abs(href),
-                slug: href.split('/hentai/').pop(),
-                title: (title ? title.textContent : (img && img.getAttribute('alt')) || '').trim(),
+                slug: slug,
+                series: seriesSlug(slug),
+                title: text(node.querySelector('h3')) || (img && img.getAttribute('alt')) || slug,
                 image: abs(img && img.getAttribute('src')),
-                badge: badge ? badge.textContent.trim() : ''
+                badge: text(badge)
             });
         });
 
@@ -116,49 +123,109 @@
         var tags = [];
         doc.querySelectorAll('input[name="tags[]"]').forEach(function (input) {
             var label = doc.querySelector('label[for="' + input.id + '"]');
-            tags.push({ value: input.value, title: (label ? label.textContent : input.value).trim() });
+            tags.push({ value: input.value, title: text(label) || input.value });
         });
 
         return { items: items, pages: pages, tags: tags };
     }
 
-    function parseEpisode(str, url) {
-        var eid = str.match(/id="e_id"\s+type="hidden"\s+value="(\d+)"/);
-        var csrf = str.match(/data-csrf="([^"]+)"/) || str.match(/name="csrf-token"\s+content="([^"]+)"/);
-        var slug = url.split('/hentai/').pop();
-        var series = slug.replace(/-\d+$/, '');
+    // Страница тайтла: /hentai/<series>
+    function parseSeries(str, series) {
+        var doc = parseHtml(str);
+        var h1 = doc.querySelector('h1');
+        var head = h1 && h1.parentElement;
 
-        // Остальные серии тайтла — из блока «More from …»
-        var siblings = {};
-        siblings[slug] = true;
-        var re = new RegExp('href="https://hstream\\.moe/hentai/(' + series.replace(/[-]/g, '\\-') + '-\\d+)"', 'g');
-        var m;
-        while ((m = re.exec(str))) siblings[m[1]] = true;
+        var description = '';
+        doc.querySelectorAll('h2').forEach(function (h2) {
+            if (!description && text(h2) === 'Description') {
+                description = h2.parentElement.textContent.replace(/^\s*Description\s*/, '')
+                    .split('\n').map(function (l) { return l.trim(); }).filter(Boolean).join('\n');
+            }
+        });
 
-        var episodes = Object.keys(siblings).map(function (s) {
-            return { slug: s, url: BASE + '/hentai/' + s, number: parseInt(s.match(/-(\d+)$/)[1], 10) };
-        }).sort(function (a, b) { return a.number - b.number; });
+        function pill(icon) {
+            var i = doc.querySelector('i.' + icon);
+            return i ? text(i.parentElement) : '';
+        }
+
+        var tags = [];
+        doc.querySelectorAll('a[href*="tags%5B0%5D="]').forEach(function (a) {
+            var t = text(a);
+            if (t && tags.indexOf(t) < 0) tags.push(t);
+        });
+
+        var episodes = [];
+        var seen = {};
+        var re = new RegExp('/hentai/' + series.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-(\\d+)$');
+        doc.querySelectorAll('a[href*="/hentai/"]').forEach(function (a) {
+            var href = a.getAttribute('href');
+            var m = href.match(re);
+            if (!m || seen[href]) return;
+            seen[href] = true;
+            var img = a.querySelector('img');
+            episodes.push({
+                slug: href.split('/hentai/').pop(),
+                url: abs(href),
+                number: parseInt(m[1], 10),
+                image: abs(img && img.getAttribute('src')),
+                badge: text(a.querySelector('.rounded-full'))
+            });
+        });
+        episodes.sort(function (a, b) { return a.number - b.number; });
+
+        var cover = doc.querySelector('img[src*="/cover-"]');
+        var og = doc.querySelector('meta[property="og:image"]');
 
         return {
-            id: eid && eid[1],
-            csrf: csrf && csrf[1],
-            uhd: /tags%5B0%5D=4k"/.test(str),
-            title: (str.match(/"name":"([^"]+)"/) || [])[1] || '',
+            title: text(h1),
+            original: head ? text(head.querySelector('p')) : '',
+            released: pill('fa-calendar'),
+            uploaded: pill('fa-upload'),
+            studio: text(doc.querySelector('a[href*="studios%5B0%5D="]')),
+            tags: tags,
+            description: description,
+            cover: abs(cover && cover.getAttribute('src')),
+            background: og ? og.getAttribute('content') : '',
             episodes: episodes
         };
     }
 
+    // ---------- качество ----------
+    var QUALITY_ORDER = ['2160', '1080i', '1080', '720'];
+    var QUALITY_NAMES = {
+        '720': 'H.264 720p',
+        '1080': 'AV1 1080p',
+        '1080i': 'AV1 1080p 48fps',
+        '2160': 'AV1 4K'
+    };
+
+    function preferredQuality() {
+        var q = String(Lampa.Storage.get('hstream_quality', '720'));
+        return QUALITY_NAMES[q] ? q : '720';
+    }
+
+    // Берём выбранное качество, а если его у серии нет — ближайшее ниже
+    function pickVariant(variants, want) {
+        var start = QUALITY_ORDER.indexOf(want);
+        if (start < 0) start = QUALITY_ORDER.length - 1;
+        for (var i = start; i < QUALITY_ORDER.length; i++) {
+            if (variants[QUALITY_ORDER[i]]) return variants[QUALITY_ORDER[i]];
+        }
+        return variants['720'];
+    }
+
     // Страница серии → /player/api → объект для плеера Lampa
-    function resolveEpisode(url, ok, fail) {
+    function resolveEpisode(url, want, ok, fail) {
         request(url, {}, function (str) {
-            var ep = parseEpisode(str, url);
-            if (!ep.id || !ep.csrf) return fail('no episode id');
+            var eid = str.match(/id="e_id"\s+type="hidden"\s+value="(\d+)"/);
+            var csrf = str.match(/data-csrf="([^"]+)"/) || str.match(/name="csrf-token"\s+content="([^"]+)"/);
+            if (!eid || !csrf) return fail('no episode id');
 
             request(BASE + '/player/api', {
-                post: JSON.stringify({ episode_id: ep.id }),
+                post: JSON.stringify({ episode_id: eid[1] }),
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRF-TOKEN': ep.csrf,
+                    'X-CSRF-TOKEN': csrf[1],
                     'X-Requested-With': 'XMLHttpRequest',
                     'Referer': url
                 }
@@ -170,22 +237,25 @@
                 var domain = d.stream_domains[Math.floor(Math.random() * d.stream_domains.length)];
                 var base = domain + '/' + d.stream_url;
 
-                // 720p H.264 — самый совместимый вариант, по умолчанию.
-                // Остальное — AV1 DASH: картинка лучше, но не всякий ТВ его тянет.
-                // Ключи AV1 начинаются не с цифры: Lampa подменяет ссылку на качество, у которого
-                // parseInt(ключ) совпадает с «качеством по умолчанию», и внешний плеер получал бы AV1.
-                var mp4 = base + '/x264.720p.mp4';
-                var quality = { '720p': mp4, 'AV1 1080p': base + '/1080/manifest.mpd' };
-                if (d.interpolated) quality['AV1 1080p 48fps'] = base + '/1080i/manifest.mpd';
-                if (ep.uhd) quality['AV1 2160p'] = base + '/2160/manifest.mpd';
+                // 720p есть только в H.264 (mp4) — самый совместимый вариант.
+                // 1080p / 1080p 48fps / 4K — только AV1 DASH: картинка лучше, но не всякий ТВ его тянет.
+                var variants = { '720': base + '/x264.720p.mp4', '1080': base + '/1080/manifest.mpd' };
+                if (d.interpolated) variants['1080i'] = base + '/1080i/manifest.mpd';
+                if (/tags%5B0%5D=4k"/.test(str)) variants['2160'] = base + '/2160/manifest.mpd';
+
+                // Ключи не начинаются с цифры: Lampa подменяет ссылку на качество, у которого
+                // parseInt(ключ) совпадает с её «качеством по умолчанию», и перебила бы выбор плагина.
+                var quality = {};
+                QUALITY_ORDER.forEach(function (q) {
+                    if (variants[q]) quality[QUALITY_NAMES[q]] = variants[q];
+                });
 
                 ok({
-                    title: d.title || ep.title,
-                    url: mp4,
+                    title: d.title || '',
+                    url: pickVariant(variants, want),
                     quality: quality,
-                    subtitles: [{ label: 'English', url: base + '/eng.vtt' }],
-                    poster: abs(d.poster)
-                }, ep);
+                    subtitles: [{ label: 'English', url: base + '/eng.vtt' }]
+                });
             }, fail);
         }, fail);
     }
@@ -194,8 +264,66 @@
         return Lampa.Utils.hash('hstream:' + slug);
     }
 
-    // ---------- каталог ----------
-    function Component(object) {
+    function playEpisode(ep, want, onStart) {
+        var cancelled = false;
+        Lampa.Loading.start(function () {
+            cancelled = true;
+            Lampa.Loading.stop();
+        });
+
+        resolveEpisode(ep.url, want || preferredQuality(), function (video) {
+            if (cancelled) return;
+            Lampa.Loading.stop();
+
+            video.timeline = Lampa.Timeline.view(timelineHash(ep.slug));
+            if (onStart) onStart();
+
+            Lampa.Player.play(video);
+            Lampa.Player.playlist([video]);
+        }, function () {
+            Lampa.Loading.stop();
+            if (!cancelled) Lampa.Noty.show('HStream: не удалось получить ссылку на видео');
+        });
+    }
+
+    function chooseQuality(onSelect) {
+        var enabled = Lampa.Controller.enabled().name;
+        Lampa.Select.show({
+            title: 'Качество',
+            items: QUALITY_ORDER.map(function (q) { return { title: QUALITY_NAMES[q], value: q }; }),
+            onSelect: function (a) {
+                Lampa.Controller.toggle(enabled);
+                onSelect(a.value);
+            },
+            onBack: function () { Lampa.Controller.toggle(enabled); }
+        });
+    }
+
+    function controller(scroll, getLast) {
+        Lampa.Controller.add('content', {
+            toggle: function () {
+                Lampa.Controller.collectionSet(scroll.render());
+                Lampa.Controller.collectionFocus(getLast() || false, scroll.render());
+            },
+            left: function () {
+                if (Navigator.canmove('left')) Navigator.move('left');
+                else Lampa.Controller.toggle('menu');
+            },
+            right: function () { Navigator.move('right'); },
+            up: function () {
+                if (Navigator.canmove('up')) Navigator.move('up');
+                else Lampa.Controller.toggle('head');
+            },
+            down: function () {
+                if (Navigator.canmove('down')) Navigator.move('down');
+            },
+            back: function () { Lampa.Activity.backward(); }
+        });
+        Lampa.Controller.toggle('content');
+    }
+
+    // ---------- каталог (поиск сайта) ----------
+    function Catalog(object) {
         var self = this;
         var scroll = new Lampa.Scroll({ mask: true, over: true, step: 300 });
         var html = $('<div class="hstream"></div>');
@@ -276,7 +404,7 @@
             });
         };
 
-        // ---------- шапка: поиск и теги ----------
+        // Шапка: поиск и теги
         this.drawHead = function () {
             head.empty();
 
@@ -339,7 +467,6 @@
             });
         };
 
-        // ---------- карточки ----------
         this.addCard = function (item) {
             var card = $('<div class="hstream__card selector">' +
                 '<div class="hstream__img"><img alt=""></div>' +
@@ -362,83 +489,23 @@
                 var cards = grid.children('.hstream__card');
                 if (cards.index(card) >= cards.length - 6) self.load(false);
             });
-            card.on('hover:enter', function () { self.play(item); });
+            card.on('hover:enter', function () {
+                Lampa.Activity.push({
+                    url: '',
+                    title: item.title.replace(/\s*-\s*\d+$/, ''),
+                    component: 'hstream_title',
+                    series: item.series,
+                    episode: item.slug,
+                    page: 1
+                });
+            });
 
             grid.append(card);
         };
 
-        this.play = function (item) {
-            var cancelled = false;
-            Lampa.Loading.start(function () {
-                cancelled = true;
-                Lampa.Loading.stop();
-            });
-
-            resolveEpisode(item.url, function (first, ep) {
-                // Ссылки на все серии тайтла получаем заранее и по очереди: внешний плеер
-                // получает плейлист через JSON, функции-«ленивые» ссылки туда не попадают,
-                // а параллельные запросы без cookie создали бы разные сессии с разными CSRF.
-                var others = ep.episodes.filter(function (e) { return e.slug !== item.slug; }).slice(0, 30);
-                var resolved = {};
-                resolved[item.slug] = first;
-
-                function next(i) {
-                    if (cancelled) return;
-                    if (i >= others.length) return start();
-                    resolveEpisode(others[i].url, function (res) {
-                        resolved[others[i].slug] = res;
-                        next(i + 1);
-                    }, function () {
-                        next(i + 1);
-                    });
-                }
-
-                function start() {
-                    Lampa.Loading.stop();
-
-                    // Элементы плейлиста — простые объекты без ссылок друг на друга
-                    var playlist = ep.episodes.filter(function (e) { return resolved[e.slug]; }).map(function (e) {
-                        return $.extend({}, resolved[e.slug], { timeline: Lampa.Timeline.view(timelineHash(e.slug)) });
-                    });
-                    var current = playlist.filter(function (p) { return p.url === first.url; })[0] || playlist[0];
-                    var element = $.extend({}, current);
-                    if (playlist.length > 1) element.playlist = playlist;
-
-                    Lampa.Player.play(element);
-                    Lampa.Player.playlist(playlist);
-                }
-
-                next(0);
-            }, function () {
-                Lampa.Loading.stop();
-                Lampa.Noty.show('HStream: не удалось получить ссылку на видео');
-            });
-        };
-
-        // ---------- жизненный цикл ----------
         this.start = function () {
             if (Lampa.Activity.active().activity !== this.activity) return;
-
-            Lampa.Controller.add('content', {
-                toggle: function () {
-                    Lampa.Controller.collectionSet(scroll.render());
-                    Lampa.Controller.collectionFocus(last || false, scroll.render());
-                },
-                left: function () {
-                    if (Navigator.canmove('left')) Navigator.move('left');
-                    else Lampa.Controller.toggle('menu');
-                },
-                right: function () { Navigator.move('right'); },
-                up: function () {
-                    if (Navigator.canmove('up')) Navigator.move('up');
-                    else Lampa.Controller.toggle('head');
-                },
-                down: function () {
-                    if (Navigator.canmove('down')) Navigator.move('down');
-                },
-                back: function () { Lampa.Activity.backward(); }
-            });
-            Lampa.Controller.toggle('content');
+            controller(scroll, function () { return last; });
         };
 
         this.render = function () { return scroll.render(); };
@@ -450,7 +517,133 @@
         };
     }
 
-    Lampa.Component.add('hstream', Component);
+    // ---------- карточка тайтла: описание и все серии ----------
+    function Title(object) {
+        var self = this;
+        var scroll = new Lampa.Scroll({ mask: true, over: true, step: 250 });
+        var html = $('<div class="hstream-title"></div>');
+        var last;
+        var info;
+
+        scroll.minus();
+
+        this.create = function () {
+            this.activity.loader(true);
+
+            request(BASE + '/hentai/' + object.series, {}, function (str) {
+                self.activity.loader(false);
+                info = parseSeries(str, object.series);
+                if (!info.title && !info.episodes.length) return self.empty();
+                self.draw();
+            }, function () {
+                self.activity.loader(false);
+                self.empty();
+            });
+
+            return this.render();
+        };
+
+        this.empty = function () {
+            html.empty().append('<div class="hstream__empty">Не удалось загрузить страницу тайтла</div>');
+            scroll.append(html);
+            this.start();
+        };
+
+        this.draw = function () {
+            html.empty();
+
+            var top = $('<div class="hstream-title__top">' +
+                '<div class="hstream-title__cover"><img alt=""></div>' +
+                '<div class="hstream-title__info">' +
+                '<div class="hstream-title__name"></div>' +
+                '<div class="hstream-title__original"></div>' +
+                '<div class="hstream-title__meta"></div>' +
+                '<div class="hstream-title__tags"></div>' +
+                '</div></div>');
+
+            if (info.cover) top.find('img').attr('src', info.cover);
+            else top.find('.hstream-title__cover').remove();
+            top.find('.hstream-title__name').text(info.title);
+            top.find('.hstream-title__original').text(info.original);
+
+            var meta = [];
+            if (info.released) meta.push('Выход: ' + info.released);
+            if (info.studio) meta.push(info.studio);
+            meta.push('Серий: ' + info.episodes.length);
+            top.find('.hstream-title__meta').text(meta.join('  ●  '));
+            top.find('.hstream-title__tags').text(info.tags.join(', '));
+
+            // Шапка — selector, чтобы по ней можно было «доскроллить» вверх к описанию
+            top.addClass('selector');
+            top.on('hover:focus', function () {
+                last = top[0];
+                scroll.update(top, true);
+            });
+            html.append(top);
+
+            if (info.description) {
+                var descr = $('<div class="hstream-title__descr selector"></div>').text(info.description);
+                descr.on('hover:focus', function () {
+                    last = descr[0];
+                    scroll.update(descr, true);
+                });
+                html.append(descr);
+            }
+
+            html.append('<div class="hstream-title__head">Серии</div>');
+
+            var list = $('<div class="hstream__grid"></div>');
+            info.episodes.forEach(function (ep) {
+                var card = $('<div class="hstream__card selector">' +
+                    '<div class="hstream__img"><img alt=""></div>' +
+                    '<div class="hstream__title"></div>' +
+                    '<div class="hstream__timeline"></div>' +
+                    '</div>');
+
+                card.find('img').attr('src', ep.image).on('load', function () {
+                    card.find('.hstream__img').addClass('hstream__img--loaded');
+                });
+                card.find('.hstream__title').text('Серия ' + ep.number);
+                if (ep.badge) card.find('.hstream__img').append($('<div class="hstream__badge"></div>').text(ep.badge));
+                card.find('.hstream__timeline').append(Lampa.Timeline.render(Lampa.Timeline.view(timelineHash(ep.slug))));
+
+                card.on('hover:focus', function () {
+                    last = card[0];
+                    scroll.update(card, true);
+                });
+                card.on('hover:enter', function () { playEpisode(ep); });
+                card.on('hover:long', function () {
+                    chooseQuality(function (q) { playEpisode(ep, q); });
+                });
+
+                list.append(card);
+                if (ep.slug === object.episode) last = card[0];
+            });
+            html.append(list);
+
+            scroll.append(html);
+            if (last) scroll.update($(last), true);
+            if (info.background) Lampa.Background.immediately(info.background);
+            this.start();
+        };
+
+        this.start = function () {
+            if (Lampa.Activity.active().activity !== this.activity) return;
+            if (info && info.background) Lampa.Background.immediately(info.background);
+            controller(scroll, function () { return last; });
+        };
+
+        this.render = function () { return scroll.render(); };
+        this.pause = function () {};
+        this.stop = function () {};
+        this.destroy = function () {
+            scroll.destroy();
+            html.remove();
+        };
+    }
+
+    Lampa.Component.add('hstream', Catalog);
+    Lampa.Component.add('hstream_title', Title);
 
     // ---------- пункт в левом меню ----------
     function addMenu() {
@@ -469,8 +662,35 @@
         $('.menu .menu__list').eq(0).append(item);
     }
 
+    // ---------- настройки ----------
+    if (Lampa.SettingsApi) {
+        Lampa.SettingsApi.addComponent({
+            component: 'hstream',
+            name: 'HStream',
+            icon: '<svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 9v6l5-3z" fill="currentColor"/></svg>'
+        });
+        Lampa.SettingsApi.addParam({
+            component: 'hstream',
+            param: {
+                name: 'hstream_quality',
+                type: 'select',
+                values: {
+                    '720': 'H.264 720p — работает везде',
+                    '1080': 'AV1 1080p',
+                    '1080i': 'AV1 1080p 48fps',
+                    '2160': 'AV1 4K'
+                },
+                'default': '720'
+            },
+            field: {
+                name: 'Качество по умолчанию',
+                description: 'Выше 720p на сайте только AV1: нужен ТВ или плеер с поддержкой AV1. Разово выбрать качество — долгое нажатие на серию.'
+            }
+        });
+    }
+
     $('<style>' +
-        '.hstream{padding:0 1.5em 2em}' +
+        '.hstream,.hstream-title{padding:0 1.5em 2em}' +
         '.hstream__head{display:flex;flex-wrap:wrap;gap:1em;padding:1em 0 .5em}' +
         '.hstream__btn{padding:.6em 1.2em;border-radius:.4em;background:rgba(255,255,255,.1);font-size:1.2em}' +
         '.hstream__btn.focus{background:#fff;color:#000}' +
@@ -484,8 +704,19 @@
         '.hstream__title{margin-top:.5em;font-size:1.1em;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
         '.hstream__timeline .time-line{margin-top:.4em}' +
         '.hstream__empty{width:100%;padding:3em;text-align:center;font-size:1.3em;opacity:.7}' +
+        '.hstream-title__top{display:flex;gap:2em;padding:1.5em 0 1em;border-radius:.6em}' +
+        '.hstream-title__cover{width:11em;flex-shrink:0}' +
+        '.hstream-title__cover img{width:100%;border-radius:.6em;display:block}' +
+        '.hstream-title__info{min-width:0}' +
+        '.hstream-title__name{font-size:2.4em;font-weight:700;line-height:1.2}' +
+        '.hstream-title__original{opacity:.6;margin-top:.3em;font-size:1.2em}' +
+        '.hstream-title__meta{margin-top:1em;font-size:1.2em}' +
+        '.hstream-title__tags{margin-top:.8em;opacity:.7;line-height:1.5}' +
+        '.hstream-title__descr{white-space:pre-line;line-height:1.5;font-size:1.15em;opacity:.85;padding:.8em 1em;border-radius:.6em;max-width:60em}' +
+        '.hstream-title__top.focus,.hstream-title__descr.focus{background:rgba(255,255,255,.08)}' +
+        '.hstream-title__head{font-size:1.6em;font-weight:600;margin:1.2em 0 .4em}' +
         '@media screen and (max-width:900px){.hstream__card{width:33.33%}}' +
-        '@media screen and (max-width:580px){.hstream__card{width:50%}}' +
+        '@media screen and (max-width:580px){.hstream__card{width:50%}.hstream-title__top{flex-direction:column}}' +
         '</style>').appendTo('head');
 
     if (window.appready) addMenu();
